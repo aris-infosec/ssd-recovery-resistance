@@ -1,7 +1,4 @@
-# ssd-recovery-resistance
-Linux SSD remnant-wipe and recovery-resistance testing tool with TRIM
-
-# SSD Remnant Wipe
+# SSD Recovery Resistance Tool - Remnant Wipe
 
 A Linux-based SSD remnant-wipe and recovery-resistance testing tool designed to make **already deleted data harder to recover** while avoiding deliberate deletion of currently existing user files.
 
