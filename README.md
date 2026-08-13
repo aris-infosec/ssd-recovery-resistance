@@ -1,8 +1,11 @@
-# SSD Recovery Resistance Tool - Remnant Wipe
+Absolutely. Here is the **updated GitHub README text** for `aris-infosec/ssd-recovery-resistance`, using the current script name and current behavior.
 
-A Linux-based SSD remnant-wipe and recovery-resistance testing tool designed to make **already deleted data harder to recover** while avoiding deliberate deletion of currently existing user files.
+````markdown
+# SSD Recovery Resistance Tool
 
-The tool combines controlled test-data generation, filesystem TRIM, controlled free-space filling, SMART/NVMe monitoring, adaptive execution profiles, identifiable test markers and SHA-256 manifests for recovery testing with tools such as PhotoRec.
+A Linux-based SSD recovery-resistance testing tool designed to make **already deleted data harder to recover** while avoiding deliberate deletion of currently existing user files.
+
+The tool combines controlled test-data generation, filesystem TRIM, adaptive free-space filling, SMART/NVMe monitoring, adaptive execution profiles, identifiable test markers and SHA-256 manifests for controlled recovery experiments with tools such as PhotoRec.
 
 > **Important:** This is **not** a Secure Erase or SSD Sanitize tool. It cannot guarantee physical destruction of every previous NAND-cell copy of deleted data.
 
@@ -10,45 +13,46 @@ The tool combines controlled test-data generation, filesystem TRIM, controlled f
 
 ## Features
 
-* TRIM availability check before any test workload begins
-* Automatic filesystem and block-device detection
-* NVMe and SATA SSD detection
-* SMART monitoring
-* Optional NVMe health monitoring through `nvme-cli`
-* SSD temperature monitoring
-* Automatic thermal pause when temperatures become critical
-* Adaptive execution based on SSD conditions and available resources
-* Automatic system analysis and profile recommendation
-* Three execution profiles:
-
-  * **Normal**
-  * **Secret**
-  * **Paranoia**
-* HTML test files
-* TXT test files
-* JPEG test files
-* Large-file write tests
-* Many-small-file write tests
-* Controlled free-space filling
-* Dynamic free-space checks during filling
-* Configurable free-space safety reserve
-* Filesystem `sync` before deletion
-* Filesystem TRIM after test-data deletion
-* Unique Run/File/Pattern identifiers
-* PhotoRec-oriented recovery markers
-* SHA-256 test manifest
-* Runtime and remaining-time estimation
-* SSD health and write-statistics logging
-* Before/after NVMe statistics
-* Thermal throttling detection
-* Automatic cooldown between runs
-* Automatic cleanup after interruption
-* Timestamped reports and logs
-* Timestamped test results for multiple runs
+- Pre-run system analysis
+- Automatic execution-profile recommendation
+- TRIM availability validation
+- Automatic filesystem and block-device detection
+- NVMe and SATA detection
+- SMART monitoring
+- Optional NVMe health monitoring through `nvme-cli`
+- SSD temperature monitoring
+- Automatic thermal pause when temperatures become critical
+- Adaptive CPU/JPG worker selection
+- Adaptive cooldown between runs
+- Three execution profiles:
+  - Normal
+  - Secret
+  - Paranoia
+- HTML test files
+- TXT test files
+- JPEG test files
+- Large-file write tests
+- Many-small-file write tests
+- Controlled free-space filling
+- Dynamic free-space monitoring
+- Configurable free-space safety reserve
+- `sync` before deletion
+- Filesystem TRIM after deletion
+- Unique Run/File/Pattern identifiers
+- PhotoRec-oriented recovery markers
+- SHA-256 test manifest
+- Runtime and remaining-time estimation
+- SSD health and write-statistics logging
+- NVMe before/after statistics
+- Thermal throttling detection
+- Automatic cleanup on interruption
+- Timestamped reports
+- Timestamped manifests
+- Timestamped logs
 
 ---
 
-## What This Tool Is Designed For
+# What This Tool Is Designed For
 
 The purpose of this project is **not to actively delete personal files**.
 
@@ -71,7 +75,7 @@ Deleted historical data
           controlled test writes
                     │
                     ▼
-                 sync
+                  sync
                     │
                     ▼
                  delete
@@ -81,7 +85,7 @@ Deleted historical data
                     │
                     ▼
       SSD controller garbage collection
-```
+````
 
 The generated test data is temporary and is the only data the script intentionally deletes.
 
@@ -112,7 +116,7 @@ This tool therefore uses filesystem TRIM and additional controlled filesystem ac
 
 Before the actual workload begins, the tool performs a system analysis.
 
-The analysis is designed to be **read-only with respect to the test workload** and determines the conditions under which the test will run.
+The analysis is designed to determine whether the configured test is appropriate for the current system.
 
 It checks:
 
@@ -138,7 +142,7 @@ Data units written
 CPU thread count
 ```
 
-The analysis also estimates the expected workload for each execution profile.
+The analysis also estimates the workload for each execution profile.
 
 Example:
 
@@ -155,18 +159,19 @@ Available Spare:      100%
 Free Space:           344.6 GiB
 
 Estimated workload:
-  Normal:              ~XX GiB
-  Secret:              ~XXX GiB
-  Paranoia:            ~XXXX GiB
+  Normal:              lower write load
+  Secret:              moderate write load
+  Paranoia:            substantially higher write load
+
+Recommendation:
+  Secret
 ```
 
-The analysis then provides a **recommended profile**.
-
-The recommendation is advisory. The user can still select another profile.
+The recommendation is advisory. The user can still choose another profile.
 
 ---
 
-# SSD Endurance Interpretation
+# SSD Endurance
 
 The NVMe `Percentage Used` value is an estimate of how much of the device's rated endurance has been consumed.
 
@@ -181,9 +186,9 @@ Percentage Used: 4%
 means approximately:
 
 ```text
-Estimated endurance consumed: ~4%
+Estimated endurance consumed:  ~4%
 Estimated endurance remaining: ~96%
-Status: EXCELLENT
+Status:                         EXCELLENT
 ```
 
 The value is a controller estimate and should not be interpreted as a guarantee of the exact remaining physical NAND lifetime.
@@ -199,7 +204,7 @@ Recommended interpretation:
 |         91–100% | CRITICAL               |
 |           >100% | BEYOND RATED ENDURANCE |
 
-The tool also records `Data Units Written`, because `Percentage Used` may remain unchanged for a substantial amount of additional write activity.
+The tool also records `Data Units Written`, because `Percentage Used` may remain unchanged for substantial additional write activity.
 
 ---
 
@@ -267,7 +272,7 @@ cooldown between runs
 
 > **More runs do not mean mathematically stronger physical erasure.**
 
-The additional runs increase write activity and the opportunity for SSD firmware to recycle previously freed blocks, but the actual physical behavior remains controller-dependent.
+Additional runs increase write activity and the opportunity for SSD firmware to recycle previously freed blocks, but physical behavior remains controller-dependent.
 
 ---
 
@@ -291,9 +296,9 @@ and can adapt:
 * free-space fill behavior
 * thermal handling
 
-For example, a cooler SSD with many CPU threads may allow more JPG workers, while a hot SSD may automatically reduce parallelism.
+A cooler SSD with more available CPU resources may use more JPG workers.
 
-This reduces unnecessary thermal stress and helps avoid making the system slower through excessive parallelism.
+A warmer SSD may automatically reduce parallelism and increase cooldown time.
 
 ---
 
@@ -308,22 +313,25 @@ The tool monitors SSD temperature whenever SMART/NVMe information is available.
 |    71–80 °C | HIGH     |
 |     > 80 °C | CRITICAL |
 
-At critical temperatures, the write process pauses automatically.
+At critical temperatures, the write workload pauses automatically.
 
 It resumes after the SSD cools below the configured recovery threshold.
 
-Typical behavior:
+Example:
 
 ```text
 SSD: 78 °C [HIGH]
-Warning: SSD is getting hot.
+
+Warning: SSD temperature is high.
 
 SSD: 82 °C [CRITICAL]
+
 Write workload paused.
 
 Waiting for <= 65 °C...
 
-SSD: 64 °C
+SSD: 64 °C [NORMAL]
+
 Workload resumed.
 ```
 
@@ -333,34 +341,34 @@ Exact thermal behavior is SSD-model dependent.
 
 # NVMe Monitoring
 
-When `nvme-cli` is available, the tool can collect NVMe health information such as:
+When `nvme-cli` is available, the tool can collect:
 
+* Critical Warning
 * temperature
-* critical warning
-* available spare
-* percentage used
-* data units written
-* media/data integrity errors
-* unsafe shutdowns
-* power cycles
+* Available Spare
+* Percentage Used
+* Data Units Written
+* Media/Data Integrity Errors
+* Unsafe Shutdowns
+* Power Cycles
 
 Example:
 
 ```text
 NVMe:
-  Critical Warning:     0
-  Temperature:          44 °C
-  Available Spare:      100%
-  Percentage Used:      4%
-  Data Units Written:   ...
-  Media Errors:         0
-  Unsafe Shutdowns:     ...
-  Power Cycles:         ...
+  Critical Warning:      0
+  Temperature:           44 °C
+  Available Spare:       100%
+  Percentage Used:       4%
+  Data Units Written:    ...
+  Media Errors:          0
+  Unsafe Shutdowns:      ...
+  Power Cycles:          ...
 ```
 
-The tool records values before and after the test when supported.
+The tool records relevant values before and after the test when supported.
 
-This makes it possible to distinguish **nominal test writes** from controller-reported write activity.
+This makes it possible to compare the controller-reported write activity with the workload generated by the script.
 
 ---
 
@@ -372,49 +380,47 @@ A configurable safety reserve is always maintained.
 
 The tool does **not** intentionally fill the filesystem to 100%.
 
-Instead:
+The available free space is divided conceptually into:
 
 ```text
 Total free space
         │
         ├── safety reserve
         │
-        └── available temporary fill
+        └── temporary fill capacity
 ```
 
 The free-space amount is rechecked during the fill process.
 
-This means that:
+This means:
 
 ```text
-Free space != total write workload
+Free space != cumulative write workload
 ```
 
-For example, a system may have:
+For example:
+
+```text
+Free space:            344 GiB
+Safety reserve:         38 GiB
+Maximum temporary fill: 306 GiB
+```
+
+The same free space can then be reused in later runs after deletion and TRIM.
+
+Therefore a system with:
 
 ```text
 344 GiB free
 ```
 
-while a Paranoia run produces:
+can legitimately perform:
 
 ```text
 1+ TiB cumulative write activity
 ```
 
-because the same free space can be reused across multiple runs.
-
-The tool clearly distinguishes:
-
-```text
-Temporary fill capacity
-```
-
-from:
-
-```text
-Cumulative write workload
-```
+without requiring 1 TiB of free space at the same time.
 
 ---
 
@@ -432,22 +438,22 @@ FILE: 0427
 PATTERN: RANDOM
 ```
 
-This marker is included in:
+Markers are included in:
 
 * HTML files
 * TXT files
 * JPEG files
 * other recovery-test data where practical
 
-This makes later PhotoRec recovery testing much more useful because recovered files can be traced back to their original run.
+This allows recovered files to be traced back to their original run and pattern.
 
 ---
 
 # SHA-256 Manifest
 
-The tool can generate a SHA-256 manifest for generated test files.
+The tool can create a SHA-256 manifest for generated test files.
 
-This allows recovered files to be compared against their original test data.
+This allows recovered files to be compared against their originals.
 
 Example workflow:
 
@@ -455,7 +461,7 @@ Example workflow:
 Original test file
         │
         ▼
-SHA-256 hash recorded
+SHA-256 recorded
         │
         ▼
 File deleted + TRIM
@@ -470,31 +476,31 @@ Recovered file
 SHA-256 comparison
 ```
 
-This makes it possible to distinguish:
+The result can distinguish between:
 
 * exact recovery
 * partial/corrupted recovery
-* unrelated files
-* files recovered from different runs
+* unrelated data
+* files recovered from another run
 
 ---
 
 # PhotoRec Testing
 
-The generated files are intended to allow controlled recovery experiments.
+The generated test files are intended to allow controlled recovery experiments.
 
-A typical test workflow is:
+A typical workflow is:
 
 1. Run this tool.
 2. Wait for the selected profile to finish.
-3. Record the generated report and manifest.
+3. Preserve the generated report and manifest.
 4. Use a separate recovery environment where possible.
 5. Run PhotoRec against the test filesystem/device.
 6. Search recovered files for `WIPE-TEST` markers.
-7. Compare recovered files against the generated SHA-256 manifest.
+7. Compare recovered files against the SHA-256 manifest.
 8. Identify which Run/Pattern survived.
 
-Example recovery marker:
+Example:
 
 ```text
 WIPE-TEST
@@ -504,7 +510,7 @@ FILE: 0427
 PATTERN: RANDOM
 ```
 
-This makes recovery results much easier to interpret than generic filenames.
+This provides much more useful recovery information than generic filenames.
 
 ---
 
@@ -513,13 +519,7 @@ This makes recovery results much easier to interpret than generic filenames.
 Install the required packages:
 
 ```bash
-sudo pacman -S imagemagick smartmontools
-```
-
-For additional NVMe health information:
-
-```bash
-sudo pacman -S nvme-cli
+sudo pacman -S imagemagick smartmontools nvme-cli
 ```
 
 Clone the repository:
@@ -535,7 +535,7 @@ Make the script executable:
 chmod +x ssd-recovery-resistance.sh
 ```
 
-Run it as the normal user:
+Run it:
 
 ```bash
 ./ssd-recovery-resistance.sh
@@ -544,6 +544,16 @@ Run it as the normal user:
 > **Do not start the entire script with `sudo`.**
 
 The script requests elevated privileges only for operations that require them.
+
+The script can be started from any working directory. Runtime results are stored relative to the script itself.
+
+For example:
+
+```bash
+~/ssd-recovery-resistance/ssd-recovery-resistance.sh
+```
+
+will store runtime data inside the repository's `runs/` directory.
 
 ---
 
@@ -557,71 +567,57 @@ ssd-recovery-resistance/
 ├── LICENSE
 ├── .gitignore
 ├── ssd-recovery-resistance.sh
-└── reports/
+└── runs/
     └── .gitkeep
 ```
 
-Runtime reports should remain local and should not be committed to a public repository.
+Runtime output is stored in timestamped directories:
 
-Recommended `.gitignore` entries:
-
-```gitignore
-reports/*
-!reports/.gitkeep
-
-wipe-test/
+```text
+runs/
+└── 2026-08-13-140500/
+    ├── report.txt
+    ├── manifest.txt
+    ├── run.log
+    └── test-data/
 ```
+
+The temporary `test-data/` directory is removed after the run.
+
+Reports, manifests and logs remain locally for analysis.
 
 ---
 
-# Reports and Logs
+# .gitignore
 
-All generated reports are stored **relative to the location of the script**.
+Runtime results should not be committed to a public GitHub repository.
 
-Example:
+Recommended `.gitignore`:
 
-```text
-ssd-recovery-resistance/
-├── ssd-recovery-resistance.sh
-└── reports/
-    └── 2026-08-13-132300/
-        ├── report.txt
-        ├── manifest.txt
-        └── report.log
+```gitignore
+# Runtime test output
+runs/*
+!runs/.gitkeep
+
+# Temporary test data
+test-data/
+
+# Logs and reports
+*.log
+*-report.txt
+*-manifest.txt
+
+# Editor / OS files
+.DS_Store
+*.swp
+*~
 ```
 
-This keeps multiple test runs organized and prevents personal SSD information from automatically being stored in the user's home directory.
-
-Reports may contain:
-
-* SSD model
-* filesystem information
-* mountpoint
-* TRIM status
-* selected profile
-* recommended profile
-* run count
-* data patterns
-* execution time
-* CPU configuration
-* temperature
-* maximum temperature
-* SMART/NVMe health
-* percentage used
-* available spare
-* controller statistics
-* free space before/after
-* temporary free-space fill
-* estimated write workload
-* controller-reported write statistics when available
-* TRIM statistics
-* run-by-run results
+This prevents personal SSD information, SMART data, reports and manifests from being accidentally uploaded to GitHub.
 
 ---
 
 # Execution Flow
-
-The tool follows this general sequence:
 
 ```text
 START
@@ -660,6 +656,48 @@ START
 
 ---
 
+# Reports and Logs
+
+Reports are stored relative to the script location.
+
+Example:
+
+```text
+ssd-recovery-resistance/
+├── ssd-recovery-resistance.sh
+└── runs/
+    └── 2026-08-13-140500/
+        ├── report.txt
+        ├── manifest.txt
+        └── run.log
+```
+
+Reports may contain:
+
+* SSD model
+* filesystem information
+* mountpoint
+* TRIM status
+* selected profile
+* recommended profile
+* run count
+* data patterns
+* execution time
+* CPU configuration
+* temperature
+* maximum temperature
+* SMART/NVMe health
+* Percentage Used
+* Available Spare
+* controller statistics
+* free space before/after
+* temporary free-space fill
+* estimated write workload
+* controller-reported write statistics
+* run-by-run results
+
+---
+
 # Safety Model
 
 The tool intentionally avoids destructive whole-device operations.
@@ -679,7 +717,7 @@ The generated test directory is validated before deletion.
 
 If an unexpected existing test directory is detected, the tool stops instead of deleting it.
 
-The tool does not intentionally delete user files outside its own test directory.
+The tool does not intentionally delete user files outside its own temporary test directory.
 
 Interrupting the program attempts to clean up only its own temporary test directory.
 
@@ -689,69 +727,30 @@ Interrupting the program attempts to clean up only its own temporary test direct
 
 TRIM availability is checked before the actual workload begins.
 
-If the filesystem cannot be trimmed, the test is aborted rather than continuing under conditions that do not match the intended recovery-resistance workflow.
+If TRIM is not available, the test is aborted rather than continuing under conditions that do not match the intended recovery-resistance workflow.
 
-The first **real** TRIM is performed after generated test data has been written, synchronized and deleted.
+The first **real** TRIM occurs after generated test data has been written, synchronized and deleted.
 
 Later TRIM operations are performed after appropriate test phases.
 
-This avoids an unnecessary real TRIM immediately before the first test run.
-
----
-
-# Write Workload vs. Free Space
-
-The tool distinguishes between:
-
-### Temporary storage requirement
-
-How much free disk space needs to be available **at the same time**.
-
-### Cumulative write workload
-
-How much data is written over the entire test.
-
-These are not the same quantity.
-
-For example:
-
-```text
-Free space:               344 GiB
-Temporary safe fill:      306 GiB
-Cumulative workload:     1+ TiB
-```
-
-This is possible because test data is deleted and the same free space can be reused by later runs.
-
-The cumulative write workload is therefore an indicator of SSD write activity, not a requirement for that amount of free space.
+This avoids an unnecessary real TRIM immediately before the first test workload.
 
 ---
 
 # Endurance and SSD Wear
 
-The tool reports both:
+The tool records both:
 
 * NVMe `Percentage Used`
 * controller-reported write statistics where available
 
-`Percentage Used` is a controller estimate of consumed endurance.
+`Percentage Used` is an estimate of consumed endurance.
 
-It is not the same as filesystem disk usage.
-
-For example:
-
-```text
-Percentage Used: 4%
-
-Interpretation:
-  Endurance consumed: ~4%
-  Status:              EXCELLENT
-  Estimated remainder: ~96%
-```
-
-The remaining percentage is only an estimate based on the SSD controller's endurance reporting.
+It is not filesystem disk usage.
 
 The actual physical wear of NAND cells cannot be observed directly from the operating system.
+
+The tool therefore reports both endurance information and actual controller write statistics where supported.
 
 ---
 
@@ -773,7 +772,7 @@ TRIM informs the storage stack which filesystem blocks are no longer required. T
 
 Therefore:
 
-> **TRIM + controlled writes + garbage collection can improve recovery resistance, but cannot provide a mathematical guarantee of physical NAND erasure.**
+> **TRIM + controlled writes + SSD garbage collection can improve recovery resistance, but cannot provide a mathematical guarantee of physical NAND erasure.**
 
 ---
 
@@ -781,9 +780,9 @@ Therefore:
 
 For guaranteed device-level destruction, manufacturer-supported SSD Secure Erase or NVMe Sanitize procedures are generally more appropriate.
 
-Those operations are intentionally **not included** in this project because they can destroy currently existing data across the whole device.
+Those operations are intentionally **not included** in this project because they can destroy currently existing data across the entire device.
 
-This project specifically focuses on the different situation where:
+This project focuses on the different situation where:
 
 > **existing files should remain intact while previously deleted data is subjected to additional recovery-resistance activity.**
 
@@ -798,30 +797,34 @@ This project is best suited for:
 * filesystem/TRIM experiments
 * studying SSD garbage collection behavior
 * testing recovery resistance of deleted test data
-* comparing different SSD/filesystem configurations
-* documenting SSD recovery experiments
+* comparing SSD/filesystem configurations
+* documenting recovery experiments
 
 It should **not** be treated as a cryptographic erasure standard.
 
 ---
 
-# Example
-
-A typical analysis might report:
+# Example System Analysis
 
 ```text
+============================================================
+                    SYSTEM ANALYSIS
+============================================================
+
 SSD:                  Samsung NVMe
 Filesystem:           ext4
 Mountpoint:           /home
 TRIM:                 AVAILABLE
+
 Temperature:          44 °C [NORMAL]
 Endurance Used:       4% [EXCELLENT]
 Available Spare:      100%
 Free Space:           344.6 GiB
-Reserved Space:       38.6 GiB
-Safe Temporary Fill:  306.0 GiB
+Safety Reserve:        38.6 GiB
+Maximum Temporary Fill:
+                      306.0 GiB
 
-Estimated workload:
+Estimated cumulative workload:
 
 NORMAL:
   1 run
@@ -837,9 +840,8 @@ PARANOIA:
 
 Recommendation:
   SECRET
+============================================================
 ```
-
-The user can accept the recommendation or select another profile.
 
 ---
 
@@ -847,7 +849,7 @@ The user can accept the recommendation or select another profile.
 
 This project is licensed under the MIT License.
 
-See [`LICENSE`](LICENSE) for details.
+See `LICENSE` for details.
 
 ---
 
@@ -864,3 +866,10 @@ Always maintain backups of important data before running filesystem-intensive ex
 Do not run this tool against a system or filesystem containing data you cannot afford to lose.
 
 The user is responsible for selecting an appropriate execution profile and understanding the potential consequences of substantial SSD write activity.
+
+```
+
+For your GitHub repository, I would use this exact description:
+
+> **Linux SSD recovery-resistance testing tool with TRIM, SMART/NVMe monitoring, adaptive execution and PhotoRec test markers.**
+```
