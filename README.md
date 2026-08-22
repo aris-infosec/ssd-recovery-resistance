@@ -8,11 +8,6 @@ Script:
 
 `SSD-Recovery-Resistance.sh`
 
-> This revision aligns the setup doc with the actual v1.8 combined script
-> (recovery-resistance levels + fill-ssd thermal monitor). Several values in
-> earlier drafts of this doc (run counts, output location, temperature
-> tiers) no longer match the current code and have been corrected below.
-
 ---
 
 ## 1. Recommended Repository Structure
