@@ -291,6 +291,7 @@ ANALYSIS_REASON=""
 
 SCRIPT_START=$(date +%s)
 NOMINAL_WRITTEN_BYTES=0
+WRITTEN_LOG=""
 TRIM_COUNT=0
 TRIM_BYTES_APPROX=0
 ANY_ABORTED=0
@@ -359,7 +360,23 @@ human() {
     }
     BEGIN{ print human(bytes) }'
 }
-add_written() { NOMINAL_WRITTEN_BYTES=$((NOMINAL_WRITTEN_BYTES + $1)); }
+add_written() {
+    # BUG FIX: this used to do `NOMINAL_WRITTEN_BYTES=$((NOMINAL_WRITTEN_BYTES + $1))`.
+    # add_written() is only ever called from inside create_html_txt/create_jpg/
+    # create_binary_test_file, and every one of those is dispatched with a
+    # trailing `&` (background job = forked subshell). A subshell's variable
+    # changes are invisible to the parent once it exits, so NOMINAL_WRITTEN_BYTES
+    # in the main script never actually changed - "Nominal data written" stayed
+    # near 0, and the TRIM-vs-written safety warning below never fired because
+    # `(( NOMINAL_WRITTEN_BYTES > 0 ))` was never true. Route through a real
+    # file instead (actual disk I/O, not shell state) and sum it in the parent.
+    [[ -n "$WRITTEN_LOG" ]] && echo "$1" >> "$WRITTEN_LOG" 2>/dev/null
+    return 0
+}
+recompute_written_bytes() {
+    [[ -n "$WRITTEN_LOG" && -f "$WRITTEN_LOG" ]] || return 0
+    NOMINAL_WRITTEN_BYTES=$(awk '{s+=$1} END{print s+0}' "$WRITTEN_LOG" 2>/dev/null || echo "$NOMINAL_WRITTEN_BYTES")
+}
 get_free_bytes()  { df -B1 --output=avail "$TARGET_DIR" | tail -n 1 | tr -d ' '; }
 get_total_bytes() { df -B1 --output=size  "$TARGET_DIR" | tail -n 1 | tr -d ' '; }
 require_cmd() { command -v "$1" >/dev/null 2>&1 || { echo "Fehlendes Programm: $1"; exit 1; }; }
@@ -459,6 +476,7 @@ init_csv() {
 }
 setup_logging() {
     mkdir -p "$RUN_DIR"; touch "$LOG_FILE"; exec > >(tee -a "$LOG_FILE") 2>&1; init_csv
+    WRITTEN_LOG="$RUN_DIR/.written_bytes.log"; : > "$WRITTEN_LOG"
     if (( DEBUG == 1 )); then
         TRACE_FILE="$RUN_DIR/trace.log"
         exec 9>"$TRACE_FILE"
@@ -503,39 +521,70 @@ detect_system() {
 # ------------------------- Discard passthrough check -----------
 # fstrim can report success while the actual TRIM never reaches the
 # physical SSD, if it's swallowed by an encryption or LVM layer in
-# between. This walks the device-mapper stack under $HOME_SOURCE and
-# checks LUKS/dm-crypt "discards" and LVM "issue_discards".
+# between. This walks the FULL device-mapper stack under $HOME_SOURCE
+# (arbitrary depth) and checks LUKS/dm-crypt "discards" and LVM
+# "issue_discards" at every layer found.
+#
+# BUG FIX: this used to check ONLY the single top-level $HOME_SOURCE
+# device. The two most common encrypted-Linux layouts each hide one
+# layer from a single-device check:
+#   - LUKS -> LVM PV -> LV -> filesystem (e.g. Ubuntu's "encrypted LVM"
+#     installer option): $HOME_SOURCE is the LV. An LV is not a crypt
+#     device, so the LUKS/allow_discards check never ran at all - a
+#     missing allow_discards on the LUKS container underneath was never
+#     reported.
+#   - LVM PV -> LV -> LUKS (each LV encrypted separately): $HOME_SOURCE
+#     is the crypt device. `lvs` doesn't recognize a crypt device as an
+#     LV, so the LVM/issue_discards check never ran - a missing
+#     issue_discards on the LV underneath was never reported.
+# Now every device in the stack (found via /sys/block/*/slaves, which
+# works regardless of stacking order) is checked for both.
 DISCARD_WARNINGS=()
 
 check_discard_passthrough() {
-    local src="$HOME_SOURCE" dm_uuid crypt_check lvm_conf
-
+    local src="$HOME_SOURCE"
     # Not a device-mapper device -> nothing to check here.
     if [[ ! "$src" =~ ^/dev/(dm-|mapper/) ]]; then
         return 0
     fi
+    _check_discard_layer "$src" 0
+}
 
-    # ---- LUKS / dm-crypt ----
+_check_discard_layer() {
+    local dev="$1" depth="$2" name slaves_dir slave dm_uuid crypt_check lvm_conf
+    (( depth > 10 )) && return 0   # guard against pathological/cyclic stacks
+    name=$(basename -- "$dev")
+
+    # ---- LUKS / dm-crypt at this layer ----
     if command -v dmsetup >/dev/null 2>&1; then
-        dm_uuid=$($SUDO dmsetup info -c --noheadings -o uuid "$src" 2>/dev/null || true)
+        dm_uuid=$($SUDO dmsetup info -c --noheadings -o uuid "$dev" 2>/dev/null || true)
         if [[ "$dm_uuid" == CRYPT-* ]]; then
-            crypt_check=$($SUDO dmsetup table "$src" 2>/dev/null || true)
+            crypt_check=$($SUDO dmsetup table "$dev" 2>/dev/null || true)
             if [[ "$crypt_check" == *allow_discards* ]]; then
-                echo "    LUKS/dm-crypt: discard passthrough ENABLED (allow_discards)."
+                echo "    LUKS/dm-crypt ($dev): discard passthrough ENABLED (allow_discards)."
             else
-                DISCARD_WARNINGS+=("LUKS/dm-crypt device '$src' does NOT have allow_discards set. TRIM will silently NOT reach the physical SSD. Fix: add 'discard' to /etc/crypttab (and cryptsetup --allow-discards / cryptsetup refresh --allow-discards), then reboot or re-open the container.")
+                DISCARD_WARNINGS+=("LUKS/dm-crypt device '$dev' does NOT have allow_discards set. TRIM will silently NOT reach the physical SSD through this layer. Fix: add 'discard' to /etc/crypttab (and cryptsetup --allow-discards / cryptsetup refresh --allow-discards), then reboot or re-open the container.")
             fi
         fi
     fi
 
-    # ---- LVM ----
-    if command -v lvs >/dev/null 2>&1 && lvs "$src" >/dev/null 2>&1; then
+    # ---- LVM at this layer ----
+    if command -v lvs >/dev/null 2>&1 && lvs "$dev" >/dev/null 2>&1; then
         lvm_conf=$(grep -REi '^\s*issue_discards\s*=\s*1' /etc/lvm/lvm.conf 2>/dev/null || true)
         if [[ -n "$lvm_conf" ]]; then
-            echo "    LVM: issue_discards = 1 (passthrough enabled)."
+            echo "    LVM ($dev): issue_discards = 1 (passthrough enabled)."
         else
-            DISCARD_WARNINGS+=("LVM is in the stack for '$src' but issue_discards is not enabled in /etc/lvm/lvm.conf. TRIM may not reach the physical SSD through the LVM layer. Fix: set issue_discards = 1 in /etc/lvm/lvm.conf.")
+            DISCARD_WARNINGS+=("LVM is in the stack for '$dev' but issue_discards is not enabled in /etc/lvm/lvm.conf. TRIM may not reach the physical SSD through the LVM layer. Fix: set issue_discards = 1 in /etc/lvm/lvm.conf.")
         fi
+    fi
+
+    # ---- Recurse into whatever this device is actually built on top of ----
+    slaves_dir="/sys/block/$name/slaves"
+    if [[ -d "$slaves_dir" ]]; then
+        for slave in "$slaves_dir"/*; do
+            [[ -e "$slave" ]] || continue
+            _check_discard_layer "/dev/$(basename -- "$slave")" $((depth + 1))
+        done
     fi
 }
 
@@ -565,6 +614,27 @@ check_btrfs_snapshots() {
 # decrypted file fragments) can end up on swap. This script never
 # touches swap; if it's active and not encrypted, that's a gap the
 # person running the test should know about.
+
+# Shared with check_swap: true (exit 0) if $1 or anything it's built on top
+# of (walking /sys/block/*/slaves) is a LUKS/dm-crypt device.
+_stack_has_luks() {
+    local dev="$1" depth="$2" name uuid slaves_dir slave
+    (( depth > 10 )) && return 1
+    if command -v dmsetup >/dev/null 2>&1; then
+        uuid=$($SUDO dmsetup info -c --noheadings -o uuid "$dev" 2>/dev/null || true)
+        [[ "$uuid" == CRYPT-* ]] && return 0
+    fi
+    name=$(basename -- "$dev")
+    slaves_dir="/sys/block/$name/slaves"
+    if [[ -d "$slaves_dir" ]]; then
+        for slave in "$slaves_dir"/*; do
+            [[ -e "$slave" ]] || continue
+            _stack_has_luks "/dev/$(basename -- "$slave")" $((depth + 1)) && return 0
+        done
+    fi
+    return 1
+}
+
 check_swap() {
     local swap_lines swap_devices encrypted_ok=1 dev src
     command -v swapon >/dev/null 2>&1 || return 0
@@ -582,11 +652,15 @@ check_swap() {
             if [[ ! "$src" =~ ^/dev/(dm-|mapper/) ]]; then
                 encrypted_ok=0
             else
-                # It's a dm device - only "safe" if it's a crypt mapping.
-                if command -v dmsetup >/dev/null 2>&1; then
-                    local uuid
-                    uuid=$($SUDO dmsetup info -c --noheadings -o uuid "$src" 2>/dev/null || true)
-                    [[ "$uuid" == CRYPT-* ]] || encrypted_ok=0
+                # BUG FIX: this used to only check whether $src ITSELF has a
+                # CRYPT- dm-uuid. Same blind spot as the discard-passthrough
+                # check: if swap lives on an LV that sits on top of a LUKS
+                # container (a swap LV in a standard "encrypted LVM" layout),
+                # $src is the LV - not a crypt device - so this reported
+                # "swap not encrypted" even when it actually is, one layer
+                # down. Now walks the whole stack via /sys/block/*/slaves.
+                if _stack_has_luks "$src" 0; then
+                    :
                 else
                     encrypted_ok=0
                 fi
@@ -851,11 +925,13 @@ render_dashboard() {
         printf '\n\n\n\n'
         DASHBOARD_INITIALIZED=1
     fi
-    if command -v tput >/dev/null 2>&1; then
-        tput cuu "$DASHBOARD_LINES" 2>/dev/null || true
-    else
-        printf '\033[%dA' "$DASHBOARD_LINES"
-    fi
+    printf '\033[%dA' "$DASHBOARD_LINES"
+    # Disable terminal auto-wrap (DECAWM) while drawing so a line longer
+    # than the current window width gets clipped instead of soft-wrapping
+    # onto an extra physical row - that extra row is what desyncs the
+    # cursor-up count above on narrow terminals, causing the redraw to
+    # drift downward and pile up instead of overwriting in place.
+    printf '\033[?7l'
     printf '\r\033[K    [%s] Overall: %s   Run %d/%d: %s   ETA to reserve: %s\n' \
         "$LEVEL_NAME" "$(render_progress_bar "$overall_pct")" "$run" "$TOTAL_RUNS" "$(render_progress_bar "$pct")" "$eta_human"
     printf '\r\033[K    files:%-6d  free:%6sGiB  rate:%10s  temp:%s%3s°C[%s]%s (peak:%s°C)  trim:%d\n' \
@@ -864,6 +940,7 @@ render_dashboard() {
     printf '\r\033[K    workers:%s%d/%d active%s  |  dispatched -> html/txt:%-5d jpg:%-5d bin:%-5d\n' \
         "$worker_color" "$JPG_ACTIVE" "$JPG_JOBS" "$RESET" "$N_HTMLTXT" "$N_JPG" "$N_BIN"
     printf '\r\033[K    elapsed:%s\n' "$(format_time "$elapsed")"
+    printf '\033[?7h'
 }
 
 status_line() {
@@ -922,11 +999,19 @@ record_trim() {
     # have dropped after a TRIM (TRIM only ever discards already-free extents;
     # a drop here would indicate something wrote to TARGET_DIR concurrently,
     # e.g. a second instance of this script or an unrelated process).
+    # NOTE on interpretation: `df`-visible free space is freed by the
+    # preceding delete, not by fstrim itself - fstrim only issues a discard
+    # to the block device and does not change filesystem-level free-space
+    # accounting. So a delta of ~0 here is NORMAL and does NOT mean TRIM
+    # failed. This check only catches a DECREASE (something else wrote to
+    # $TARGET_DIR concurrently). The real "did TRIM do anything" signal is
+    # the trimmed-bytes line fstrim itself printed above (TRIM_BYTES_APPROX)
+    # and the TRIM-vs-written ratio in the final report.
     free_after=$(get_free_bytes)
     if [[ "$free_before" =~ ^[0-9]+$ && "$free_after" =~ ^[0-9]+$ ]]; then
         if (( free_after >= free_before )); then
             free_delta=$(( free_after - free_before ))
-            printf '    -> Free space after TRIM: %s GiB (+%s GiB reclaimed)\n' \
+            printf '    -> Free space after TRIM (sanity check, not a TRIM-effect measure): %s GiB (delta vs. pre-TRIM: +%s GiB)\n' \
                 "$(format_gib "$free_after")" "$(format_gib "$free_delta")"
         else
             printf '    WARNING: Free space dropped by %s GiB during TRIM.\n' \
@@ -996,14 +1081,7 @@ write_report_header() {
 }
 
 # ------------------------- Analysis ---------------------------
-estimate_profile_runs() {
-    case "$1" in
-        NORMAL) echo 1 ;;
-        RESTRICTED) echo "$RESTRICTED_RUNS" ;;
-        SECRET) echo "$SECRET_RUNS" ;;
-        PARANOIA) echo "$PARANOIA_RUNS" ;;
-    esac
-}
+# (removed: unused estimate_profile_runs() - dead code, never called)
 
 # Reads the learned average fill rate (bytes/sec) and sample count for a
 # level, if any history exists yet. Echoes "rate_bps samples", or nothing.
@@ -1255,7 +1333,12 @@ create_html_txt() {
     } > "$TEST_DIR/file-$i.html"
     current_size=$(stat -c%s "$TEST_DIR/file-$i.html")
     remaining=$((HTML_BASE_SIZE - current_size))
-    (( remaining > 0 )) && head -c "$remaining" /dev/urandom >> "$TEST_DIR/file-$i.html"
+    # Was: `head -c "$remaining" /dev/urandom` - direct /dev/urandom reads are
+    # CPU-bound and were the actual bottleneck here, often slower than the
+    # NVMe write path itself once several workers run concurrently. Now uses
+    # the same pre-generated incompressible pool as TXT/BIN (fill_from_pool),
+    # which is a fast disk/page-cache read instead of live CSPRNG output.
+    (( remaining > 0 )) && fill_from_pool "$TEST_DIR/file-$i.html" "$remaining" "$i"
     echo '</body></html>' >> "$TEST_DIR/file-$i.html"
     manifest_file "$TEST_DIR/file-$i.html" HTML "$run" "$file_id" "$pattern"
     add_written "$(stat -c%s "$TEST_DIR/file-$i.html")"
@@ -1322,6 +1405,14 @@ generate_random_pool() {
         head -c $((RANDOM_POOL_SIZE_MIB * 1024 * 1024)) /dev/urandom > "$RANDOM_POOL"
     fi
     printf '    -> [%s] Random pool ready (%ds).\n' "$(date '+%H:%M:%S')" "$(( $(date +%s) - t0 ))"
+    # BUG FIX: this 256 MiB/run of real, physically-written data was never
+    # counted via add_written(), yet it lives in $TEST_DIR and gets deleted
+    # + fstrim'd just like every other test file. That under-counted
+    # NOMINAL_WRITTEN_BYTES relative to what fstrim actually reports as
+    # trimmed, silently inflating the "TRIM vs. written ratio" in the final
+    # report (sometimes past 100%) - i.e. it could mask a real TRIM problem
+    # by making the ratio look better than it is.
+    [[ -f "$RANDOM_POOL" ]] && add_written "$(stat -c%s "$RANDOM_POOL" 2>/dev/null || echo 0)"
 }
 
 random_source_for_file() {
@@ -1372,11 +1463,27 @@ create_binary_test_file() {
             done ;;
         *) dd if="$src" of="$path" bs=1M skip="$pool_skip" count="$size_mib" status=none ;;
     esac
-    printf 'WIPE-TEST | LEVEL=%s | RUN=%02d | FILE=%s | PATTERN=%s | FS=%s | ALLOC=%s\n' \
-        "$LEVEL_NAME" "$run" "$file_id" "$pattern" "$FILESYSTEM_PROFILE" "$BINARY_MODE" \
-        | dd of="$path" bs=1 conv=notrunc status=none
+    # Was: `dd bs=1` - one syscall per byte to write ~100 bytes of marker
+    # text. Harmless at small scale but wasteful and needless overhead per
+    # BIN file. Same result (overwrite first N bytes, keep rest via
+    # conv=notrunc), one write instead of ~100.
+    local marker
+    marker=$(printf 'WIPE-TEST | LEVEL=%s | RUN=%02d | FILE=%s | PATTERN=%s | FS=%s | ALLOC=%s\n' \
+        "$LEVEL_NAME" "$run" "$file_id" "$pattern" "$FILESYSTEM_PROFILE" "$BINARY_MODE")
+    printf '%s' "$marker" | dd of="$path" bs="${#marker}" count=1 conv=notrunc status=none
     manifest_file "$path" BIN "$run" "$file_id" "$pattern"
-    add_written "$(stat -c%s "$path")"
+    # BUG FIX: FRAGMENTED mode seeks past 1 MiB gaps between chunks on
+    # purpose (to fragment allocation), which makes the file's apparent
+    # size (stat -c%s, including those unwritten sparse holes) bigger than
+    # what was actually written. The real bytes written is exactly
+    # size_mib (every chunk's `take` MiB sums to size_mib) - use that
+    # instead of the inflated logical size, so it doesn't overstate real
+    # write volume in the "Nominal data written" report.
+    if [[ "$BINARY_MODE" == "FRAGMENTED" ]]; then
+        add_written "$((size_mib * 1024 * 1024))"
+    else
+        add_written "$(stat -c%s "$path")"
+    fi
 }
 export -f create_jpg
 export TEST_DIR LEVEL_NAME
@@ -1868,7 +1975,10 @@ for run in $(seq 1 "$TOTAL_RUNS"); do
             0|1)
                 vlog "file $INDEX: dispatching html/txt worker ($((JPG_ACTIVE + 1))/$JPG_JOBS active)"
                 create_html_txt "$INDEX" "$run" "$PATTERN" &
-                ((JPG_ACTIVE++)) || true; ((N_HTMLTXT++)) || true
+                # create_html_txt writes one .html AND one .txt per call, so
+                # the dashboard counter needs +2 to reflect actual files,
+                # not +1 per dispatch.
+                ((JPG_ACTIVE++)) || true; ((N_HTMLTXT+=2)) || true
                 if (( JPG_ACTIVE >= JPG_JOBS )); then wait -n || true; ((JPG_ACTIVE--)) || true; fi
                 ;;
             2)
@@ -1929,6 +2039,7 @@ for run in $(seq 1 "$TOTAL_RUNS"); do
         sleep 2
     done
     wait 2>/dev/null || true
+    recompute_written_bytes
     echo
     echo "    -> $INDEX files created in this run."
     echo "    Test data:"; du -sh "$TEST_DIR" 2>/dev/null || true
@@ -2052,6 +2163,7 @@ record_trim
 status_line; echo
 
 # ------------------------- Final metrics ----------------------
+recompute_written_bytes
 TOTAL_TIME=$(($(date +%s) - SCRIPT_START))
 END_FREE_BYTES=$(get_free_bytes)
 END_HEALTH=$(get_health || true)
