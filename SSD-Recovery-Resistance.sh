@@ -290,6 +290,9 @@ ANALYSIS_RECOMMENDATION=""
 ANALYSIS_REASON=""
 
 SCRIPT_START=$(date +%s)
+SCRIPT_START_HUMAN=$(date '+%Y-%m-%d %H:%M:%S')
+declare -a RUN_START_HUMAN_LOG=()
+declare -a RUN_END_HUMAN_LOG=()
 NOMINAL_WRITTEN_BYTES=0
 WRITTEN_LOG=""
 TRIM_COUNT=0
@@ -1863,6 +1866,7 @@ echo "START"
 # ------------------------- Main runs --------------------------
 for run in $(seq 1 "$TOTAL_RUNS"); do
     RUN_START=$(date +%s)
+    RUN_START_HUMAN=$(date '+%Y-%m-%d %H:%M:%S')
     PER_RUN_START_DATA_WRITTEN_BYTES=$(get_data_written_bytes || true)
     PER_RUN_HOST_WRITE_DELTA=""
     mkdir -p "$TEST_DIR"
@@ -2091,6 +2095,9 @@ for run in $(seq 1 "$TOTAL_RUNS"); do
     status_line; echo
 
     RUN_END=$(date +%s)
+    RUN_END_HUMAN=$(date '+%Y-%m-%d %H:%M:%S')
+    RUN_START_HUMAN_LOG+=("$RUN_START_HUMAN")
+    RUN_END_HUMAN_LOG+=("$RUN_END_HUMAN")
     RUN_TIME=$((RUN_END - RUN_START))
     TOTAL_ELAPSED=$((RUN_END - SCRIPT_START))
     CURRENT_FREE=$(get_free_bytes)
@@ -2107,6 +2114,7 @@ for run in $(seq 1 "$TOTAL_RUNS"); do
     {
         echo "------------------------------------------------------------"
         echo "RUN $run/$TOTAL_RUNS  |  $LEVEL_NAME  |  $PATTERN  |  fs=$FILESYSTEM_PROFILE alloc=$ALLOC_PATTERN aggr=$([[ $AGGRESSIVE_ALLOC -eq 1 ]] && echo on || echo off)"
+        echo "  start=$RUN_START_HUMAN  end=$RUN_END_HUMAN"
         echo "  files=$INDEX  duration=$(format_time "$RUN_TIME")  free=$(format_gib "$CURRENT_FREE")GiB  peak=${PEAK_TEMP:-n/a}°C  aborted=$([[ $ABORTED -eq 1 ]] && echo yes || echo no)"
         echo "  nominal_total=$(format_gib "$NOMINAL_WRITTEN_BYTES")GiB  host_write_delta=${PER_RUN_HOST_WRITE_DELTA:+$(format_gib "$PER_RUN_HOST_WRITE_DELTA")GiB}${PER_RUN_HOST_WRITE_DELTA:-n/a}"
     } >> "$REPORT_FILE"
@@ -2119,6 +2127,8 @@ for run in $(seq 1 "$TOTAL_RUNS"); do
 
     echo
     echo "RUN $run / $TOTAL_RUNS complete"
+    echo "  Start time:   $RUN_START_HUMAN"
+    echo "  End time:     $RUN_END_HUMAN"
     echo "  Files:        $INDEX"
     echo "  Duration:     $(format_time "$RUN_TIME")  (total elapsed so far: $(format_time "$TOTAL_ELAPSED"))"
     echo "  Free space:   $(format_gib "$CURRENT_FREE") GiB"
@@ -2164,6 +2174,7 @@ status_line; echo
 
 # ------------------------- Final metrics ----------------------
 recompute_written_bytes
+SCRIPT_END_HUMAN=$(date '+%Y-%m-%d %H:%M:%S')
 TOTAL_TIME=$(($(date +%s) - SCRIPT_START))
 END_FREE_BYTES=$(get_free_bytes)
 END_HEALTH=$(get_health || true)
@@ -2193,6 +2204,15 @@ fi
     echo "Aggressive allocation:    $([[ $AGGRESSIVE_ALLOC -eq 1 ]] && echo ON || echo OFF)"
     echo "Reserve kept free/run:    ${RESERVE_MB} MiB"
     echo "Total duration:           $(format_time "$TOTAL_TIME")"
+    echo "Overall start time:       $SCRIPT_START_HUMAN"
+    echo "Overall end time:         $SCRIPT_END_HUMAN"
+    if (( ${#RUN_START_HUMAN_LOG[@]} > 0 )); then
+        echo "Per-run start/end times:"
+        for (( _rt_i = 0; _rt_i < ${#RUN_START_HUMAN_LOG[@]}; _rt_i++ )); do
+            printf "  run %d: start %s -> end %s\n" \
+                "$((_rt_i + 1))" "${RUN_START_HUMAN_LOG[$_rt_i]}" "${RUN_END_HUMAN_LOG[$_rt_i]}"
+        done
+    fi
     echo "Nominal data written:     $(format_gib "$NOMINAL_WRITTEN_BYTES") GiB"
     if [[ -n "$HOST_WRITE_DELTA" ]]; then
         echo "Controller host writes:   $(format_gib "$HOST_WRITE_DELTA") GiB"
