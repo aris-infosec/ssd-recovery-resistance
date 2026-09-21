@@ -1,11 +1,5 @@
 # SSD Recovery Resistance Tester (v1.10)
 
-**Repository:** https://github.com/aris-infosec/ssd-recovery-resistance
-**Script:** `SSD-Recovery-Resistance.sh`
-**Tool by:** Aris.Infosec
-
----
-
 ## What is this?
 
 When you delete a file on an SSD, the data isn't necessarily gone — the
