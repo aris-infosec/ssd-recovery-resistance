@@ -99,9 +99,11 @@ export LC_ALL=C
 #         running over SSH without tmux/screen.
 #       - Push notifications (ntfy): asked after the mode is chosen (yes/no,
 #         then the channel name, remembered for next time), or --notify=NAME /
-#         --no-notify. Messages: started, and finished / aborted / failed with
-#         runtime, temperatures, data written and wear status - sent BEFORE a
-#         requested power-off. Env: NOTIFY_SERVER, NOTIFY_CHANNEL, NOTIFY_TOKEN.
+#         --no-notify. Messages: test started; per run "Run n/N started",
+#         "Run n/N 50%" and "Run n/N finished"; problems (drive hot, thermal
+#         pause / cool-down / cut-off, stuck workers, undeletable files); and
+#         finished / aborted / failed with runtime, temperatures, data written
+#         and wear status - sent BEFORE a requested power-off. No TRIM messages. Env: NOTIFY_SERVER, NOTIFY_CHANNEL, NOTIFY_TOKEN.
 #       - --cleanup: removes leftovers of a crashed run (test-data folders,
 #         disabled swap) and optionally runs TRIM.
 #       - Peak temperature is tracked per run by the monitor (was cumulative and
@@ -448,6 +450,10 @@ COOLDOWN_STABLE_SECONDS=10   # drive must stay <= target this long (ignores sens
 COOLDOWN_TARGET_EFF=""       # effective target in degrees C, resolved once START_TEMP is known
 BREAK_COUNT=0; BREAK_EARLY=0; BREAK_CAPPED=0; BREAK_FIXED=0; SUM_BREAK_SECONDS=0
 THERMAL_PAUSE_TIMEOUTS=0
+NOTIFY_WARN_SENT=0   # 1 once the "drive is hot" message went out in the current run
+NOTIFY_HALF_SENT=0   # 1 once the "50 %" message went out in the current run
+NOTIFY_PAUSE_COUNT=0 # thermal PAUSE messages sent in the current run (capped, see thermal_gate)
+NOTIFY_PAUSE_MAX=3   # a drive hovering around the limit must not flood the phone
 POST_TRIM_IDLE=10
 
 RESET=$'\033[0m'; BOLD=$'\033[1m'
@@ -767,46 +773,45 @@ notify_final() {
     return 0
 }
 
-# ---- Compact per-run / per-TRIM notifications (low priority, one-liners) ----
-# These are extra "heartbeat" pings on top of notify_start / notify_final, so
-# you can follow along without watching the terminal. Kept to a single short
-# line each: never fatal, never blocks (same notify_send under the hood).
+# ---- Progress notifications (low priority, short) ----
+# Per run: "Run n/N started", "Run n/N 50%" (fill phase half way) and
+# "Run n/N finished". No per-TRIM messages (too noisy). Never fatal, never
+# blocks for long (same notify_send under the hood).
 
 notify_run_start() {
     (( NOTIFY_ENABLED == 1 )) || return 0
     local r="$1" total="$2" body
-    body=$(printf 'Run %d/%d starting | %s/%s | temp %s C | wear %s | free %s GiB' \
-        "$r" "$total" "$LEVEL_NAME" "${PATTERN:-n/a}" "${TEMP_NOW:-n/a}" \
-        "${START_PERCENT_USED:-n/a}" "$(format_gib "$(get_free_bytes)")")
+    body=$(printf '%s / %s | temp %s C | free %s GiB' \
+        "$LEVEL_NAME" "${PATTERN:-n/a}" "${TEMP_NOW:-n/a}" "$(format_gib "$(get_free_bytes)")")
     notify_send "Run $r/$total started" low fast_forward "$body"
+}
+
+notify_run_half() {
+    (( NOTIFY_ENABLED == 1 )) || return 0
+    local r="$1" total="$2" body t
+    sample_peak
+    t=$(current_temp)
+    body=$(printf 'Fill phase half way after %s | temp %s C | peak %s C | free %s GiB' \
+        "$(format_time "$(( $(date +%s) - RUN_START ))")" "${t:-n/a}" "${RUN_PEAK_TEMP:-n/a}" \
+        "$(format_gib "${FREE_NOW:-0}")")
+    notify_send "Run $r/$total 50%" low hourglass_flowing_sand "$body"
 }
 
 notify_run_finish() {
     (( NOTIFY_ENABLED == 1 )) || return 0
-    local r="$1" total="$2" body pct
-    pct=$(( r * 100 / total ))
-    body=$(printf 'Run %d/%d done (%d%%) in %s | files %d | free %s GiB | peak %s C%s' \
-        "$r" "$total" "$pct" "$(format_time "$RUN_TIME")" "$INDEX" \
-        "$(format_gib "$CURRENT_FREE")" "${RUN_PEAK_TEMP:-n/a}" \
-        "$([[ $ABORTED -eq 1 ]] && echo " | ABORTED (thermal)" || echo "")")
-    notify_send "Run $r/$total finished" low white_check_mark "$body"
+    local r="$1" total="$2" body prio=low tags=white_check_mark title
+    title="Run $r/$total finished"
+    if (( ABORTED == 1 )); then title="$title (thermal cut-off)"; prio=default; tags=warning; fi
+    body=$(printf 'Took %s | files %d | free %s GiB | peak %s C' \
+        "$(format_time "$RUN_TIME")" "$INDEX" "$(format_gib "$CURRENT_FREE")" "${RUN_PEAK_TEMP:-n/a}")
+    notify_send "$title" "$prio" "$tags" "$body"
 }
 
-notify_trim_start() {
+# ---- Problem notifications ----
+# notify_issue TITLE PRIORITY TAGS BODY - "Run n/N" is prefixed automatically.
+notify_issue() {
     (( NOTIFY_ENABLED == 1 )) || return 0
-    local label="$1" free_b="$2" body
-    body=$(printf 'TRIM #%d starting (%s) | free before %s GiB' \
-        "$TRIM_COUNT" "$label" "$(format_gib "$free_b")")
-    notify_send "TRIM #$TRIM_COUNT started" low recycle "$body"
-}
-
-notify_trim_finish() {
-    (( NOTIFY_ENABLED == 1 )) || return 0
-    local label="$1" elapsed="$2" free_a="$3" bytes="${4:-0}" body
-    body=$(printf 'TRIM #%d done (%s) in %ds | trimmed %s | free after %s GiB' \
-        "$TRIM_COUNT" "$label" "$elapsed" "$(human "$bytes")" \
-        "$(format_gib "$free_a")")
-    notify_send "TRIM #$TRIM_COUNT finished" low recycle "$body"
+    notify_send "Run ${run:-?}/${TOTAL_RUNS:-?}: $1" "$2" "$3" "$4"
 }
 
 # Final exit trap: cleanup, plus a "FAILED" message if the script dies after the
@@ -1374,7 +1379,7 @@ beep() {
 # Waits here if the SSD is in PAUSE state; returns 1 if CRITICAL/EMERGENCY
 # was hit (caller must abort the current fill run).
 thermal_gate() {
-    local temp thermal cool_counter=0 pause_start="" in_pause=0
+    local temp thermal cool_counter=0 pause_start="" in_pause=0 pause_notified=0
     while true; do
         temp=$(<"$TEMP_STATE")
         thermal=$(<"$THERMAL_STATE")
@@ -1385,13 +1390,22 @@ thermal_gate() {
                 echo
                 echo "    !!! ${thermal}: SSD ${temp}°C - stopping write, cooling down !!!"
                 if [[ "$thermal" == EMERGENCY ]]; then beep 5; else beep 3; fi
+                notify_issue "THERMAL CUT-OFF ($thermal)" "$([[ $thermal == EMERGENCY ]] && echo urgent || echo high)" rotating_light \
+                    "Drive at ${temp} C (critical from ${TEMP_CRITICAL} C, emergency from ${TEMP_EMERGENCY} C). Writing stopped, run ended early, drive cools down."
                 return 1
                 ;;
             PAUSE) in_pause=1 ;;
         esac
 
         if (( in_pause == 0 )); then
-            [[ "$thermal" == WARNING ]] && vlog "thermal WARNING at ${temp}C (writes continue, JPG workers may be throttled)"
+            if [[ "$thermal" == WARNING ]]; then
+                vlog "thermal WARNING at ${temp}C (writes continue, JPG workers may be throttled)"
+                if (( NOTIFY_WARN_SENT == 0 )); then
+                    NOTIFY_WARN_SENT=1
+                    notify_issue "drive is hot (${temp} C)" default thermometer \
+                        "Warning level ${TEMP_WARNING} C reached. Writes continue; they pause at ${TEMP_PAUSE} C."
+                fi
+            fi
             return 0
         fi
 
@@ -1399,7 +1413,15 @@ thermal_gate() {
         # at TEMP_RESUME (not merely below the PAUSE threshold: the monitor's
         # state flips PAUSE -> WARNING at 69 C, which used to end the pause
         # at 69 C although the message promised TEMP_RESUME) ----
-        [[ -z "$pause_start" ]] && pause_start=$SECONDS
+        if [[ -z "$pause_start" ]]; then
+            pause_start=$SECONDS
+            if (( NOTIFY_PAUSE_COUNT < NOTIFY_PAUSE_MAX )); then
+                NOTIFY_PAUSE_COUNT=$(( NOTIFY_PAUSE_COUNT + 1 ))
+                pause_notified=1
+                notify_issue "thermal PAUSE (${temp} C)" high fire \
+                    "Writes paused until the drive is <= ${TEMP_RESUME} C. $( (( THERMAL_PAUSE_MAX_SECONDS > 0 )) && echo "Run is ended early if this takes longer than ${THERMAL_PAUSE_MAX_SECONDS}s." || echo "No time limit." )$( (( NOTIFY_PAUSE_COUNT == NOTIFY_PAUSE_MAX )) && echo " (Further pauses in this run are not reported.)" )"
+            fi
+        fi
         # Bounded pause: if the drive cannot cool down within
         # THERMAL_PAUSE_MAX_SECONDS, give up on this run gracefully (same
         # path as CRITICAL: the run ends, test data is deleted, TRIM runs,
@@ -1409,6 +1431,8 @@ thermal_gate() {
             echo "    !!! Thermal PAUSE lasted $(( SECONDS - pause_start ))s (limit ${THERMAL_PAUSE_MAX_SECONDS}s) at ${temp}°C - ending this run early instead of waiting forever !!!"
             THERMAL_PAUSE_TIMEOUTS=$((THERMAL_PAUSE_TIMEOUTS + 1))
             beep 3
+            notify_issue "thermal pause timed out (${temp} C)" high no_entry \
+                "Drive did not cool to <= ${TEMP_RESUME} C within ${THERMAL_PAUSE_MAX_SECONDS}s. Run ended early (thermal cut-off)."
             return 1
         fi
         printf '\r    Thermal PAUSE at %s°C - waiting for <= %s°C (%s) ... ' "$temp" "$TEMP_RESUME" \
@@ -1419,7 +1443,11 @@ thermal_gate() {
         else
             cool_counter=0
         fi
-        if (( cool_counter >= COOL_TIME )); then echo; echo "    -> Cooled down to ${temp}°C, resuming."; return 0; fi
+        if (( cool_counter >= COOL_TIME )); then echo; echo "    -> Cooled down to ${temp}°C, resuming."
+            (( pause_notified == 1 )) && notify_issue "cooled down, resuming (${temp} C)" default snowflake \
+                "Pause lasted $(( SECONDS - pause_start ))s. Run continues."
+            return 0
+        fi
     done
 }
 
@@ -1613,11 +1641,10 @@ trim_dry_run() { $SUDO fstrim --dry-run -v "$TARGET_DIR"; }
 record_trim() {
     local label="${1:-run ${run:-?}/${TOTAL_RUNS:-?}}"
     local out number unit factor free_before free_after free_delta trim_pass_label
-    local trim_start_ts=$(date +%s) this_trim_bytes=0
+    local this_trim_bytes=0
     free_before=$(get_free_bytes)
     TRIM_COUNT=$((TRIM_COUNT + 1))
     trim_pass_label="TRIM pass #${TRIM_COUNT}"
-    notify_trim_start "$label" "$free_before"
     printf '    -> [%s] %s: running fstrim...\n' "$(date '+%H:%M:%S')" "$trim_pass_label"
     if ! out=$($SUDO fstrim -v "$TARGET_DIR" 2>&1); then
         echo "$out"; echo "TRIM failed. Aborting."; exit 1
@@ -1669,7 +1696,6 @@ record_trim() {
             echo "    Something else may be writing to $TARGET_DIR concurrently."
         fi
     fi
-    notify_trim_finish "$label" "$(( $(date +%s) - trim_start_ts ))" "$free_after" "$this_trim_bytes"
 }
 
 # ------------------------- Manifest / Report -----------------
@@ -2579,7 +2605,7 @@ echo "Level:               $LEVEL_NAME"
 echo "Runs:                $TOTAL_RUNS$([[ $REPEAT_COUNT -gt 1 ]] && echo "  ($REPEAT_COUNT passes x $BASE_RUNS runs)")"
 echo "Power off when done: $([[ $POWEROFF_REQUESTED -eq 1 ]] && echo "YES (30 s abortable countdown)" || echo "no")"
 echo "Sleep inhibitor:     $INHIBIT_STATE"
-echo "Notifications:       $([[ $NOTIFY_ENABLED -eq 1 ]] && echo "ON -> $NOTIFY_SERVER/$NOTIFY_CHANNEL (start + end/abort/fail; before power-off)" || echo off)"
+echo "Notifications:       $([[ $NOTIFY_ENABLED -eq 1 ]] && echo "ON -> $NOTIFY_SERVER/$NOTIFY_CHANNEL (start, per-run start/50%/finish, problems, end/abort/fail; before power-off)" || echo off)"
 session_risk_warning
 echo "CPU Threads:         $CPU_THREADS"
 echo "Worker threads:      $JPG_JOBS"
@@ -2709,6 +2735,7 @@ for run in $(seq 1 "$TOTAL_RUNS"); do
     RUN_START=$(date +%s)
     RUN_START_HUMAN=$(date '+%Y-%m-%d %H:%M:%S')
     begin_run_peak "$run"
+    NOTIFY_WARN_SENT=0; NOTIFY_HALF_SENT=0; NOTIFY_PAUSE_COUNT=0
     PER_RUN_START_DATA_WRITTEN_BYTES=$(get_data_written_bytes || true)
     PER_RUN_HOST_WRITE_DELTA=""
     # Position inside the current pass. Pattern/allocation selection below
@@ -2800,6 +2827,11 @@ for run in $(seq 1 "$TOTAL_RUNS"); do
     while true; do
         if (( FREE_POLL_COUNTER % FREE_POLL_INTERVAL == 0 )); then
             FREE_NOW=$(get_free_bytes)
+            if (( NOTIFY_HALF_SENT == 0 && NOTIFY_ENABLED == 1 )) && [[ "$FREE_NOW" =~ ^[0-9]+$ ]] \
+                && (( (FILL_START_FREE - FREE_NOW) * 2 >= FILL_TARGET_BYTES )); then
+                NOTIFY_HALF_SENT=1
+                notify_run_half "$run" "$TOTAL_RUNS"
+            fi
         fi
         FREE_POLL_COUNTER=$((FREE_POLL_COUNTER + 1))
         if (( FREE_NOW <= RESERVE_BYTES )); then
@@ -2882,6 +2914,8 @@ for run in $(seq 1 "$TOTAL_RUNS"); do
         if (( WAIT_ELAPSED > WAIT_MAX_SECONDS )); then
             STRAGGLER_PIDS=$(worker_pids); STRAGGLER_PIDS=${STRAGGLER_PIDS//$'\n'/ }
             printf '\n    !! Background JPG worker(s) exceeded %ds - sending SIGTERM: %s\n' "$WAIT_MAX_SECONDS" "$STRAGGLER_PIDS"
+            notify_issue "stuck worker(s) killed" default warning \
+                "Background writer(s) did not finish within ${WAIT_MAX_SECONDS}s and were terminated. Run continues."
             # shellcheck disable=SC2086
             [[ -n "$STRAGGLER_PIDS" ]] && kill $STRAGGLER_PIDS 2>/dev/null || true
             sleep 5
@@ -2938,6 +2972,8 @@ for run in $(seq 1 "$TOTAL_RUNS"); do
         if (( DELETE_REMAINING > 0 )); then
             printf '    !! ERROR: %d item(s) still remain after retry - this run''s free-space/TRIM results are unreliable.\n' "$DELETE_REMAINING"
             printf '    !! Check permissions or disk errors in %s manually.\n' "$TEST_DIR"
+            notify_issue "test files could not be deleted" high warning \
+                "$DELETE_REMAINING item(s) remain in the test folder after retry. Free-space/TRIM results of this run are unreliable. Check permissions / disk errors."
         fi
     fi
     printf '    -> [%s] Deleted (%d item(s) remaining).\n' "$(date '+%H:%M:%S')" "$DELETE_REMAINING"
