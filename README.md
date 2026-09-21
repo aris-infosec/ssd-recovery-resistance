@@ -1,4 +1,10 @@
-# SSD Recovery Resistance Tester
+# SSD Recovery Resistance Tester (v1.10)
+
+**Repository:** https://github.com/aris-infosec/ssd-recovery-resistance
+**Script:** `SSD-Recovery-Resistance.sh`
+**Tool by:** Aris.Infosec
+
+---
 
 ## What is this?
 
@@ -25,6 +31,27 @@ Along the way it also reads and reports the SSD's own health data (SMART
 attributes, NVMe wear percentage, temperature, controller-reported host
 writes) before and after, so you can see the real cost of running this in
 terms of drive wear — not just whether it "worked."
+
+### What it actually does, step by step
+
+1. Detects the filesystem, block device, transport (NVMe/SATA/etc.), and
+   whether TRIM/discard is available.
+2. Checks for common gaps that make TRIM *look* successful while data
+   stays recoverable: LUKS/dm-crypt without `allow_discards`, LVM without
+   `issue_discards`, unencrypted active swap, and (on btrfs) snapshots
+   that keep old file versions alive (see §18a).
+3. Shows a pre-run analysis and a level picker (or uses `--level`).
+4. For each run: generates a pool of incompressible random data (for
+   Restricted/Secret/Paranoia), cycles HTML/TXT/JPG/BIN file creation
+   across multiple workers until free space hits the reserve, syncs,
+   deletes everything it created, and runs `fstrim` (Paranoia adds an
+   extra verification TRIM pass per run).
+5. Monitors SSD temperature throughout via a background thread and
+   pauses/aborts a run if the drive gets too hot.
+6. Writes a report, manifest, per-run CSV, and full log, then prints a
+   final summary including SMART/NVMe before/after values, TRIM
+   effectiveness, wear delta, and the start/end time of the overall run
+   and of every individual run.
 
 ## Why would you want this?
 
@@ -120,6 +147,7 @@ report.txt
 manifest.txt
 run.log
 runs.csv
+trace.log
 
 # OS/editor files
 .DS_Store
@@ -147,11 +175,33 @@ first launch.
 
 ---
 
-## 4. Add the Script
+## 4. Enter the Folder and Run It
+
+The script is already part of the repo you just cloned, so there's
+nothing to copy — just move into the folder, confirm it's there, make it
+executable, and run it:
 
 ```bash
-cp ~/Downloads/SSD-Recovery-Resistance.sh .
+cd ssd-recovery-resistance
+ls
 chmod +x SSD-Recovery-Resistance.sh
+./SSD-Recovery-Resistance.sh
+```
+
+`ls` should show `SSD-Recovery-Resistance.sh`, `README.md`, `LICENSE`,
+`.gitignore`, and the `tests/` folder. `chmod +x` only needs to be done
+once — Git doesn't always preserve the executable bit on clone/download,
+so if you skip this step you'll get a `Permission denied` error instead
+of the script starting.
+
+Running it with no flags launches the interactive numbered level picker
+(see §11a) and asks its setup questions (sleep inhibitor, notifications,
+power-off, repeat count) before doing anything destructive — nothing is
+written to disk until you confirm. If you already know what you want,
+skip straight to a non-interactive run, e.g.:
+
+```bash
+./SSD-Recovery-Resistance.sh --level=secret --yes
 ```
 
 ---
@@ -176,21 +226,42 @@ if `b2sum` isn't installed.
 The full list of hard-required commands the script checks for at startup:
 
 ```text
-bash magick fstrim findmnt lsblk df stat dd sync awk grep head tail sed
+bash fstrim findmnt lsblk df stat dd sync awk grep head tail sed
 sha256sum tee nproc mktemp flock
 ```
+
+plus ImageMagick: either `magick` (v7) **or** `convert` (v6) — the script uses
+whichever it finds (v7 preferred). Optional helpers: `curl` (push
+notifications), `systemd-inhibit` (blocks suspend during the run), `smartctl`
+and `nvme` (see below).
 
 `smartctl` and `nvme` are optional — without them, temperature/SMART/NVMe
 fields in the report will show as `n/a`, but the fill/delete/TRIM cycle
 still works.
 
-**Do not start the script with `sudo`.** Run it as your normal user:
+On Debian/Ubuntu:
+
+```bash
+sudo apt install imagemagick util-linux smartmontools nvme-cli openssl coreutils
+```
+
+`shred` (part of `coreutils`) is only used by Paranoia to wipe its own
+manifest; if it's missing, the manifest is left in place.
+
+Requirements: Linux, Bash 4+ (arrays, `[[ ]]`), and either root or a
+working `sudo`.
+
+**Running as root vs. as a normal user.** The recommended way is to run
+the script as your normal user:
 
 ```bash
 ./SSD-Recovery-Resistance.sh
 ```
 
-The script checks whether it's already root; if not, it verifies `sudo`
+Running it directly as root (or `sudo ./SSD-Recovery-Resistance.sh`)
+also works — the script detects root and simply skips the internal
+`sudo` calls — but running as a normal user keeps the output files owned
+by you. The script checks whether it's already root; if not, it verifies `sudo`
 works (`sudo -v`) up front and fails fast with a clear message if it
 doesn't, rather than dying mid-run after hours of filling the disk. It
 then uses `sudo` internally only for the specific commands that need root
@@ -229,7 +300,8 @@ the script from):
             ├── report.txt
             ├── manifest.txt
             ├── run.log
-            └── runs.csv
+            ├── runs.csv
+            └── trace.log        (only if DEBUG=1)
 ```
 
 So if the repo lives at `~/ssd-recovery-resistance` but you run it from
@@ -245,7 +317,9 @@ the project folder (and everything under it) is created inside
 This is intentional: it lets you point the tool at any mounted drive
 without copying the script there.
 
-The temporary `test-data/` directory inside each run is removed after
+Everything the script creates is cleaned up automatically on exit
+(including Ctrl-C), leaving only the report/manifest/CSV/log files
+behind. The temporary `test-data/` directory inside each run is removed after
 that run completes (or on interrupt/abort, via a `trap`-based cleanup),
 using `find -mindepth 1 -delete` with an automatic verify-and-retry pass
 rather than a shell glob — at tens of thousands of files, a glob-based
@@ -310,11 +384,30 @@ Two distinct pauses exist:
 * **Post-TRIM idle** (`POST_TRIM_IDLE`, default 10 s) — after every
   `fstrim` call, giving the controller a moment before the next
   measurement.
-* **Run cooldown** (`RUN_COOLDOWN`) — between full fill/delete/TRIM runs;
-  default 30 s, automatically adjusted by `adapt_settings()` based on
-  current temperature (see §14 — cooldown now also scales with the same
-  thermal tiers that govern worker count, not just a single hot/normal
-  toggle).
+* **Break between runs** — between full fill/delete/TRIM runs, and
+  between passes when repeating. It is **adaptive and temperature
+  based** and can never wait longer than **7 minutes**:
+
+  | Situation | What happens |
+  |---|---|
+  | Drive cools to the target (idle-at-launch + 5 °C, clamped to 35 °C … `TEMP_WARNING`−5) and stays there 10 s in a row, after at least `COOLDOWN_MIN_SECONDS` (30 s) | Break ends **early**, next run starts |
+  | Drive is still warm when `COOLDOWN_MAX_SECONDS` (420 s = 7:00) is reached | Break ends anyway ("hard limit"); the next run starts and `adapt_settings()` lowers the worker count if the drive is still warm |
+  | Temperature flaps around the target and is never steady | Same as above: ends at the hard limit |
+  | No temperature sensor available | Fixed `COOLDOWN_SECONDS` break (default 300 s, never above the maximum) |
+  | `COOLDOWN_MAX_SECONDS=0` | No break at all |
+
+  The live line shows elapsed time, current drive temperature, the target
+  and the hard limit. The plan/ETA use an estimate of `(min+max)/2` per
+  break, replaced by the real average as breaks happen. No break is taken
+  after the very last run, and the final report lists how many breaks
+  ended early vs. at the limit.
+* **Bounded thermal pause (no indefinite waiting).** If the drive reaches
+  the PAUSE threshold *during* a run and cannot cool down within
+  `THERMAL_PAUSE_MAX_SECONDS` (default 420 s), that run is ended
+  gracefully — the same path as a CRITICAL event: test data deleted, TRIM
+  run, the run marked as thermally aborted, exit code 2 — instead of
+  waiting forever. The next run (after its break) then gets a fresh try.
+  Set it to `0` for the old unlimited wait.
 
 The controller's internal garbage-collection behavior remains outside OS
 control, so these pauses are a heuristic, not a guarantee that background
@@ -415,6 +508,129 @@ The picker itself:
 [6] Show analysis and exit
 [7] Abort
 ```
+
+### Repeat count and power-off questions (new in v1.10)
+
+Right after the level is chosen — *before* the execution plan and the
+final `Start?` confirmation — two more questions are asked:
+
+1. **"Number of passes [1]"** — how many times the *complete* level
+   should be run back to back. One pass = all runs of that level
+   (Paranoia = 6 runs by default), so `2` passes of Paranoia = 12 runs.
+   Every pass restarts the level's own pattern sequence (e.g. Paranoia
+   begins each pass with RANDOM + FRAGMENTED again), and the normal
+   cooldown is kept between runs *and* between passes. The plan, ETA,
+   dashboard, report and `runs.csv` all show the real total.
+2. **"Power off the computer automatically when everything has
+   finished? [y/N]"** — if yes, the script shows a 30-second abortable
+   countdown after the final report, runs its normal cleanup (swap
+   re-enabled, helper processes stopped) and then powers the machine off
+   (`systemctl poweroff`, falling back to `poweroff` / `shutdown -h now`).
+
+Power-off only happens after a **normal completion**. Ctrl-C, `kill`,
+pre-flight failures or any error exit *never* power the machine off, and
+Ctrl-C (or SIGTERM) during the 30 s countdown simply cancels it and
+exits with the normal exit code (0, or 2 after a thermal abort).
+
+Both can be answered up front on the command line (`--repeat=N`,
+`--poweroff` / `--no-poweroff`); with `--yes` or `--dry-run` nothing is
+asked and the defaults apply (1 pass, no power-off).
+
+> **v1.10 fix worth knowing about:** earlier versions waited for the
+> background JPG workers with a check that also counted the thermal
+> monitor as a "worker". After *every* run that meant an idle 180 s wait,
+> followed by the script terminating its own thermal monitor — so from
+> run 2 onward there was no thermal monitoring at all. Workers are now
+> waited for by PID and the monitor is left running for the whole session.
+
+> **v1.10 fix #2 — Ctrl-C now really cleans up.** In earlier versions a
+> genuine Ctrl-C at the terminal (not `kill`) stopped the script with exit
+> status 1 *without* running the cleanup: the log-writing `tee` process was
+> killed by the same Ctrl-C, the next message failed, and the script exited
+> before removing the test files or re-enabling swap. Now Ctrl-C prints
+> `ABORT REQUESTED`, cleans up and exits with status 130. Closing the
+> terminal / a dropped SSH connection also runs the cleanup.
+
+> **Wear warning:** every extra pass writes almost the full free space
+> again. Repeating Paranoia consumes real NAND endurance — use it
+> deliberately.
+
+### Push notifications (new in v1.10)
+
+After you choose the mode (and passes / power-off) the setup asks
+**"Send notifications? [y/N]"** and, if yes, for a **channel name** (an
+[ntfy](https://ntfy.sh) topic). The last channel is remembered
+(`~/.config/ssd-recovery-resistance/notify.conf`, mode 600) and offered as the
+default next time. Non-interactive: `--notify=NAME` / `--no-notify`.
+
+You get a message when the test **starts** (level, estimate, wear now) and when it
+**finishes, aborts or fails** — with runtime, data written (nominal and
+controller host writes), temperatures (start / peak / end), wear status
+(percentage used, delta, spare, health), media errors, unsafe shutdowns, breaks,
+thermal cut-offs and TRIM. If power-off is enabled the message is sent
+**before** the countdown and the shutdown. Failures (Ctrl-C, `kill`, closed
+terminal, script error) send a high-priority message too, after cleanup.
+
+In between, every run sends three short low-priority messages so you can follow
+along: **`Run 1/6 started`**, **`Run 1/6 50%`** (fill phase half way) and
+**`Run 1/6 finished`**. There are no per-TRIM messages.
+
+Problems get their own message (prefixed with `Run n/N:`):
+
+| Message | Priority | When |
+|---|---|---|
+| `drive is hot (66 C)` | default | Warning temperature reached (once per run) |
+| `thermal PAUSE (70 C)` | high | Writing is paused until the drive cools down |
+| `cooled down, resuming` | default | Pause ended, run continues |
+| `thermal pause timed out` | high | Drive did not cool in time, run ended early |
+| `THERMAL CUT-OFF (CRITICAL/EMERGENCY)` | high / urgent | Critical temperature, run ended early |
+| `stuck worker(s) killed` | default | A background writer hung and was terminated |
+| `test files could not be deleted` | high | Delete step left files behind |
+
+A message that cannot be sent never blocks the run: curl gives up after about
+12 seconds and the script carries on (power-off included).
+
+> **Privacy:** on the public ntfy.sh anyone who knows the channel name can read
+> the messages. Choose a hard-to-guess name (e.g. `ssdtest-k7x2q9`), or run your
+> own server and set `NOTIFY_SERVER` / `NOTIFY_TOKEN`. The channel name is never
+> written to the report.
+
+### Sleep inhibitor and SSH sessions (new in v1.10)
+
+A multi-hour test must not fall asleep. Unless `--no-inhibit` is given, the run
+holds a `systemd-inhibit` lock (`sleep:idle:handle-lid-switch`), released
+automatically when the script ends — even after `kill -9`. If it cannot be
+obtained (no systemd, no permission) the plan says so; make sure the computer
+cannot suspend by other means.
+
+Over SSH, a dropped connection sends SIGHUP: the run is **aborted** (cleanup runs,
+results incomplete, a `FAILED (connection lost)` notification is sent). The plan
+warns when you run over SSH without `tmux`/`screen` — start the test inside
+`tmux new -s ssdtest`.
+
+### Recovering after a crash: `--cleanup` (new in v1.10)
+
+After a power cut or `kill -9` the normal cleanup never ran. `--cleanup` finds
+leftover script-owned `test-data` folders (and reports whether swap was left
+disabled), then offers to delete them, switch swap back on and run TRIM. It
+only touches real directories named `test-data` exactly one level below a run
+folder in this script's own `runs/` directory; reports and logs are kept.
+`--cleanup --dry-run` only lists, `--cleanup --yes` does everything.
+
+### Other v1.10 fixes worth knowing
+
+* Peak temperature is tracked **per run** by the monitor (it used to be cumulative
+  and only sampled inside the thermal gate, so short spikes were missed).
+* A thermal PAUSE now ends when the drive is back at `TEMP_RESUME` (62 °C) for the
+  cool-down time — previously it ended as soon as it dropped below 70 °C.
+* Closed terminal / dropped SSH (SIGHUP) has its own handler (exit 129). After
+  death by an untrapped signal bash reports `$?` = 0 in the exit trap, so the
+  script no longer relies on the exit code to detect an abnormal end.
+* The abort handler ignores further Ctrl-C while cleaning up (a second Ctrl-C used
+  to cut the cleanup short).
+* Stalled background workers are now really killed after `WORKER_WAIT_MAX_SECONDS`:
+  the PID list was built in a way that always came back empty.
+* ImageMagick 6 (`convert`) is accepted where v7 (`magick`) is missing.
 
 If you're scripting this tool (cron, CI, a wrapper script) and want
 deterministic non-interactive behavior, always pass `--level=X --yes`
@@ -704,9 +920,36 @@ Additional safeguards present in the current script:
 * Post-TRIM free-space verification: if free space unexpectedly drops
   right after a TRIM, the script warns that something else may be writing
   to the target directory concurrently.
+* **Swap is restored.** If the script disables swap (`swapoff -a`, the
+  default when unencrypted swap is detected — see `--swapoff` /
+  `--no-swapoff`), it re-enables it (`swapon -a`) when it exits,
+  including on Ctrl+C.
 
 The tool does not intentionally delete user files outside its own
 generated `TEST_DIR`.
+
+---
+
+## 18a. Important Warnings the Script May Show
+
+* **Discard passthrough:** if the filesystem sits on LUKS and/or LVM, the
+  script walks the whole device-mapper stack and warns if
+  `allow_discards` (LUKS) or `issue_discards` (LVM) is missing anywhere
+  in it — TRIM can report success while never reaching the physical SSD.
+* **btrfs snapshots:** Snapper/Timeshift/manual snapshots keep old file
+  versions alive; overwriting/deleting in the current subvolume alone
+  will not free or TRIM them. Delete relevant snapshots first if you
+  want a meaningful result.
+* **Unencrypted swap:** sensitive data can land in swap; this script
+  never touches swap contents itself (it only temporarily disables swap
+  so the fill isn't disturbed).
+* **TRIM reported vs. written far below 100%:** printed in the final
+  report if TRIM reclaimed much less than was written — treat it as a
+  sign discard isn't fully passing through your storage stack, not as
+  proof the test failed.
+
+None of these are fatal by default (except a hard `STOP` from
+SMART/NVMe health) — you're asked to confirm before continuing.
 
 ---
 
@@ -762,13 +1005,16 @@ START
   ├── Pre-run system analysis + graded recommendation (STOP/Normal/
   │     Restricted/Secret/Paranoia)
   ├── Level selection (numbered picker by default, or --level=...)
+  ├── Question: how many passes of the whole level? (or --repeat=N)
+  ├── Question: power off when finished? (or --poweroff/--no-poweroff)
   ├── Aggressive allocation mode decision
   ├── Effective reserve calculated (tighter for Paranoia)
   ├── Learned ETA shown if history exists for the selected level
   ├── Execution plan shown
   ├── Final confirmation (or --yes; skipped entirely under --dry-run)
+  ├── 5-second countdown
   │
-  └── For each run (1..TOTAL_RUNS):
+  └── For each run (1..TOTAL_RUNS = passes x runs-per-level):
          │
          ├── Fresh incompressible random-data pool generated
          │     (Restricted/Secret/Paranoia; Normal uses zero-fill)
@@ -787,6 +1033,7 @@ START
   ├── Final report written (report.txt)
   ├── Paranoia: manifest.txt shredded
   ├── sudo keepalive loop stopped
+  ├── Optional: 30 s abortable countdown, cleanup, power off
   └── DONE (exit 0, or 2 if any run was thermally aborted)
 ```
 
@@ -802,7 +1049,8 @@ SSD-Recovery-Resistance/          (auto-created at launch location)
         ├── report.txt
         ├── manifest.txt
         ├── run.log
-        └── runs.csv
+        ├── runs.csv
+        └── trace.log             (only if DEBUG=1)
 ```
 
 `report.txt` contains: SSD model, filesystem info, mountpoint, TRIM
@@ -815,8 +1063,25 @@ count and reported bytes (with a warning if TRIM reported well under 50%
 of what was written), free space before/after, endurance delta (wear %
 before → after), and the full SMART/NVMe start/end comparison table.
 
+The report also records timing: total duration, **overall start/end
+time**, and a **per-run start → end list**; each run's own start/end is
+also printed live when the run completes and stored in its report block:
+
+```text
+Total duration:           04:04:07
+Overall start time:       2026-09-20 03:30:14
+Overall end time:         2026-09-20 07:34:21
+Per-run start/end times:
+  run 1: start 2026-09-20 03:30:19 -> end 2026-09-20 04:15:40
+  run 2: start 2026-09-20 04:15:41 -> end 2026-09-20 05:01:58
+  ...
+```
+
 `runs.csv` adds one machine-readable row per run:
 `run,total_runs,level,pattern,filesystem,allocation,aggressive_alloc,files,duration_s,free_bytes_end,peak_temp_c,aborted_thermal,nominal_written_bytes,host_write_delta_bytes`
+
+`run.log` is the full console output of the run. `trace.log` exists only
+with `DEBUG=1` and contains the full `set -x` bash trace.
 
 All of the above are intentionally excluded from Git via `.gitignore`,
 along with `.eta_history`.
@@ -834,22 +1099,89 @@ along with `.eta_history`.
                     (falls back to --level, or paranoia if not given).
 --aggressive        Force aggressive allocation mode on.
 --no-aggressive     Force aggressive allocation mode off.
---swapoff           Automatically run 'swapoff -a' if the swap warning
-                    fires (this is the default).
---no-swapoff        Don't touch swap even if the warning fires.
+--swapoff           (default) If unencrypted swap is detected, run
+                    'swapoff -a' automatically, no prompt. Swap is
+                    re-enabled ('swapon -a') when the script exits,
+                    including on Ctrl-C.
+--no-swapoff        Prompt instead (or leave swap alone if combined
+                    with --yes).
 --jobs=N            Pin worker count to N, skipping the adaptive CPU/
                     temp/free-space analysis entirely (the thermal
                     safety pause/abort still applies regardless).
 --no-manifest-hash  Skip per-file hashing in manifest.txt (see §16).
+--repeat=N          Run the complete level N times in a row, N = 1..99 (e.g. paranoia
+                    --repeat=2 = 2 x 6 runs). Skips the "how many times?"
+                    question. Default: ask (1 with --yes).
+--poweroff          Power off the computer after a normal, complete finish
+                    (30 s abortable countdown). Skips the question.
+--no-poweroff       Never power off. Skips the question. Default: ask
+                    (no power-off with --yes).
+--notify[=NAME]     Push notifications via ntfy to channel NAME (start, and
+                    finished / aborted / failed - before a power-off). Without
+                    =NAME the saved channel or env NOTIFY_CHANNEL is used.
+                    Default: ask (off with --yes).
+--no-notify         Never send notifications (skips the question).
+--cleanup           Remove leftovers of an interrupted run (script-owned
+                    test-data folders, switch swap back on), optionally TRIM.
+--no-inhibit        Do not block suspend / idle / lid-close during the run.
 --dry-run           Show the full analysis and execution plan, write no
                     files, run no TRIM, exit before the actual test.
+-h, --help          Show help and exit.
 ```
 
-Environment variable overrides (partial list — see the script header for
-the full set): `RESTRICTED_RUNS`, `SECRET_RUNS`, `PARANOIA_RUNS`,
-`RESERVE_MB`, `PARANOIA_RESERVE_FLOOR_MB`, `TEMP_WARNING`, `TEMP_PAUSE`,
-`TEMP_RESUME`, `TEMP_CRITICAL`, `TEMP_EMERGENCY`, `TEMP_INTERVAL`,
-`SOUND_ENABLED`, `VERBOSE`, `DASHBOARD_INTERVAL`.
+### Environment variable overrides
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `RESERVE_MB` | 100 | MiB kept free at all times per run (fill stops here) |
+| `RESTRICTED_RUNS` | 2 | Runs for the Restricted level |
+| `SECRET_RUNS` | 3 | Runs for the Secret level |
+| `PARANOIA_RUNS` | 6 | Runs for the Paranoia level |
+| `PARANOIA_RESERVE_FLOOR_MB` | 50 | Hard floor for Paranoia's tighter reserve |
+| `NOTIFY_SERVER` | https://ntfy.sh | ntfy server (self-hosted works too) |
+| `NOTIFY_CHANNEL` | – | Default channel when `--notify` is given without a name |
+| `NOTIFY_TOKEN` | – | Optional bearer token for a protected server (passed via stdin, never in `ps`) |
+| `WORKER_WAIT_MAX_SECONDS` | 180 | Background workers still running this long after a fill get SIGTERM, then SIGKILL |
+| `COOLDOWN_MIN_SECONDS` | 30 | Shortest break, even if the drive is already cool |
+| `COOLDOWN_MAX_SECONDS` | 420 | **Hard limit** of a break (7 min); `0` = no break |
+| `COOLDOWN_TARGET_C` | auto | Temperature to cool down to (`auto` = idle at launch + 5 °C; or 20–90) |
+| `COOLDOWN_SECONDS` | 300 | Fixed break used only when no temperature sensor is available |
+| `THERMAL_PAUSE_MAX_SECONDS` | 420 | Longest in-run thermal PAUSE before the run is ended gracefully; `0` = unlimited |
+| `SOUND_ENABLED` | 1 | Terminal bell on CRITICAL/EMERGENCY thermal events |
+| `VERBOSE` | 0 | Per-file/per-worker detail; dashboard refreshed every file |
+| `DEBUG` | 0 | Full `set -x` trace written to `<run-dir>/trace.log` |
+| `DASHBOARD_INTERVAL` | 10 | Dashboard redraw interval (dispatch-count based) |
+| `TEMP_INTERVAL` | 1 | Temperature polling interval in seconds |
+| `TEMP_WARNING` / `TEMP_PAUSE` / `TEMP_RESUME` / `TEMP_CRITICAL` / `TEMP_EMERGENCY` | 65 / 70 / 62 / 80 / 85 (°C) | Thermal thresholds |
+
+### Examples
+
+```bash
+# Non-interactive Paranoia run, no prompts:
+./SSD-Recovery-Resistance.sh --level=paranoia --yes
+
+# See what it *would* do, without writing anything:
+./SSD-Recovery-Resistance.sh --level=secret --dry-run
+
+# Pin to 4 worker threads, skip manifest hashing for speed:
+./SSD-Recovery-Resistance.sh --level=restricted --jobs=4 --no-manifest-hash --yes
+
+# Run Paranoia twice in a row, then power the computer off (unattended):
+./SSD-Recovery-Resistance.sh --level=paranoia --repeat=2 --poweroff --yes
+
+# Custom run counts and reserve:
+RESERVE_MB=200 SECRET_RUNS=5 PARANOIA_RUNS=8 ./SSD-Recovery-Resistance.sh --level=paranoia
+```
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | Completed normally, no thermal aborts |
+| 1 | Pre-flight failure (missing tool, TRIM unavailable, SMART/NVMe STOP, bad config, user declined a prompt, etc.) |
+| 2 | Completed, but at least one run was cut short by thermal limits |
+| 129 | Terminal closed / SSH connection lost (SIGHUP) — cleanup ran, results incomplete |
+| 130 | Interrupted (Ctrl-C, SIGTERM) — cleanup ran |
 
 ---
 
@@ -903,6 +1235,33 @@ Best suited for:
 * documenting recovery experiments
 
 **Not** a cryptographic erasure standard.
+
+---
+
+## 25a. Automated tests (new in v1.10)
+
+```bash
+sudo tests/run-all.sh            # everything except the slow Paranoia test (~13 min)
+sudo tests/run-all.sh --quick    # only the fast cases (~30 s)
+sudo tests/run-all.sh --full     # also the Paranoia repeat test (adds ~3 min)
+tests/run-all.sh --list          # show the cases
+sudo tests/run-all.sh --only 08  # a single case (--keep keeps the work dir)
+```
+
+It **never touches your real drives**: everything runs on a 300 MB ext4 image
+loop-mounted under `/tmp/ssdrr-tests`, with a fake temperature sensor, fake SMART
+wear counters, a local ntfy-compatible capture server and stubbed
+`systemctl`/`poweroff`/`shutdown` (nothing is ever shut down). Needs root,
+`mkfs.ext4`, `losetup`, `mount`, `fstrim`, `python3`, `curl` and ImageMagick.
+
+The cases cover: static checks and `--help`, command-line / environment
+validation, unit tests of the real functions cut out of the script (thermal gate,
+adaptive break, message builder, ImageMagick detection, worker handling), `--cleanup`,
+full end-to-end runs (repeat + power-off + notification order, thermal cut-off,
+drive that never cools), signals (TERM, HUP, USR1), **real keyboard Ctrl-C and a
+closed terminal through a pseudo terminal**, the interactive questions, the sleep
+inhibitor and Paranoia pass restarts. Set `SCRIPT_UNDER_TEST=/path/to/script` to
+test another copy.
 
 ---
 
