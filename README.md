@@ -1,6 +1,6 @@
 # SSD Recovery Resistance Tester (v1.10)
 
-## What is this?
+### What is this?
 
 When you delete a file on an SSD, the data isn't necessarily gone — the
 filesystem just stops pointing at it. Whether it's actually recoverable
